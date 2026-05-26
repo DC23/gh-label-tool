@@ -1,0 +1,47 @@
+renames:
+  - from: core feature
+    to: roadmap
+
+labels:
+  - name: bug
+    color: d73a4a
+    description: Something isn't working
+  - name: documentation
+    color: 0075ca
+    description: Improvements or additions to documentation
+  - name: duplicate
+    color: cfd3d7
+    description: This issue or pull request already exists
+  - name: enhancement
+    color: a2eeef
+    description: A feature request from the community
+  - name: help wanted
+    color: 008672
+    description: Extra attention is needed
+  - name: invalid
+    color: e4e669
+    description: This doesn't seem right
+  - name: question
+    color: d876e3
+    description: Further information is requested
+  - name: wontfix
+    color: ffffff
+    description: This will not be worked on
+  - name: research & development
+    color: 00884F
+    description: Exploratory R&D to help figure things out
+  - name: roadmap
+    color: B090EB
+    description: A planned feature on the project roadmap
+  - name: in progress
+    color: 2B45EE
+    description: Implementation is in progress
+  - name: refactoring
+    color: D19510
+    description: Quality improvements that don't change existing functionality
+  - name: maintenance
+    color: 96D3A3
+    description: System plumbing, maintenance, CI/CD workflows
+  - name: blocked
+    color: e8a0a0
+    description: Progress is blocked by an external dependency

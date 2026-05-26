@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+# Requires: requests, pyyaml
+
+import argparse
+import os
+import sys
+import yaml
+import requests
+
+API_BASE = "https://api.github.com"
+
+
+def get_token():
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        sys.exit("Error: GITHUB_TOKEN environment variable is not set.")
+    return token
+
+
+def headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def check_response(resp):
+    if not resp.ok:
+        try:
+            msg = resp.json().get("message", resp.text)
+        except Exception:
+            msg = resp.text
+        sys.exit(f"Error {resp.status_code}: {msg}")
+
+
+def get_labels(owner, repo, token):
+    results = []
+    page = 1
+    while True:
+        resp = requests.get(
+            f"{API_BASE}/repos/{owner}/{repo}/labels",
+            headers=headers(token),
+            params={"per_page": 100, "page": page},
+        )
+        check_response(resp)
+        batch = resp.json()
+        if not batch:
+            break
+        results.extend(batch)
+        page += 1
+    return results
+
+
+def create_label(owner, repo, label, token):
+    resp = requests.post(
+        f"{API_BASE}/repos/{owner}/{repo}/labels",
+        headers=headers(token),
+        json={
+            "name": label["name"],
+            "color": label["color"],
+            "description": label.get("description", ""),
+        },
+    )
+    check_response(resp)
+
+
+def update_label(owner, repo, old_name, label, token):
+    resp = requests.patch(
+        f"{API_BASE}/repos/{owner}/{repo}/labels/{requests.utils.quote(old_name)}",
+        headers=headers(token),
+        json={
+            "new_name": label["name"],
+            "color": label["color"],
+            "description": label.get("description", ""),
+        },
+    )
+    check_response(resp)
+
+
+def delete_label(owner, repo, name, token):
+    resp = requests.delete(
+        f"{API_BASE}/repos/{owner}/{repo}/labels/{requests.utils.quote(name)}",
+        headers=headers(token),
+    )
+    check_response(resp)
+
+
+def load_yaml(path):
+    if not os.path.exists(path):
+        sys.exit(f"Error: {path} not found. Run 'labels seed <owner/repo>' first.")
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def split_repo(repo_arg):
+    parts = repo_arg.split("/")
+    if len(parts) != 2 or not all(parts):
+        sys.exit(f"Error: repo must be in 'owner/repo' format, got '{repo_arg}'")
+    return parts[0], parts[1]
+
+
+# --- commands ---
+
+def cmd_seed(args):
+    owner, repo = split_repo(args.repo)
+    token = get_token()
+    raw = get_labels(owner, repo, token)
+    labels = [
+        {
+            "name": l["name"],
+            "color": l["color"],
+            "description": l.get("description", ""),
+        }
+        for l in raw
+    ]
+    data = {"labels": labels}
+    with open("labels.yaml", "w") as f:
+        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+    print(f"Wrote {len(labels)} labels to labels.yaml")
+
+
+def cmd_apply(args):
+    owner, repo = split_repo(args.repo)
+    token = get_token()
+    dry_run = args.dry_run
+
+    data = load_yaml("labels.yaml")
+    yaml_labels = {l["name"]: l for l in data.get("labels", [])}
+    renames = data.get("renames", [])
+
+    existing = {l["name"]: l for l in get_labels(owner, repo, token)}
+
+    if args.mode == "replace":
+        _apply_replace(owner, repo, token, yaml_labels, renames, existing, dry_run)
+    else:
+        _apply_merge(owner, repo, token, yaml_labels, renames, existing, dry_run)
+
+
+def _plan_renames(renames, yaml_labels, existing):
+    """
+    Returns list of (old_name, new_label) for renames that are applicable
+    (i.e. the old label exists on the repo).
+    """
+    planned = []
+    for r in renames:
+        old = r["from"]
+        new = r["to"]
+        if old in existing and new in yaml_labels:
+            planned.append((old, yaml_labels[new]))
+    return planned
+
+
+def _apply_replace(owner, repo, token, yaml_labels, renames, existing, dry_run):
+    planned_renames = _plan_renames(renames, yaml_labels, existing)
+    renamed_old = {old for old, _ in planned_renames}
+    renamed_new = {label["name"] for _, label in planned_renames}
+
+    to_delete = [name for name in existing if name not in renamed_old]
+    to_create = [l for name, l in yaml_labels.items() if name not in renamed_new]
+
+    print(f"Plan for replace on {owner}/{repo}:")
+    for old, label in planned_renames:
+        print(f"  rename  '{old}' -> '{label['name']}'")
+    for name in to_delete:
+        print(f"  delete  '{name}'")
+    for label in to_create:
+        print(f"  create  '{label['name']}'")
+
+    if not dry_run:
+        print()
+        print(
+            f"WARNING: {len(to_delete)} label(s) will be permanently deleted from this repo."
+        )
+        print("Deleted labels are removed from all issues immediately. This cannot be undone.")
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted.")
+            sys.exit(0)
+
+        for old, label in planned_renames:
+            update_label(owner, repo, old, label, token)
+            print(f"  renamed  '{old}' -> '{label['name']}'")
+
+        for name in to_delete:
+            delete_label(owner, repo, name, token)
+            print(f"  deleted  '{name}'")
+
+        for label in to_create:
+            create_label(owner, repo, label, token)
+            print(f"  created  '{label['name']}'")
+
+        print(f"\nDone: renamed {len(planned_renames)}, deleted {len(to_delete)}, created {len(to_create)}.")
+    else:
+        print(f"\nDry run complete: would rename {len(planned_renames)}, delete {len(to_delete)}, create {len(to_create)}.")
+
+
+def _apply_merge(owner, repo, token, yaml_labels, renames, existing, dry_run):
+    planned_renames = _plan_renames(renames, yaml_labels, existing)
+    renamed_new = {label["name"] for _, label in planned_renames}
+
+    # Apply renames to our local view of existing labels
+    working = dict(existing)
+    for old, label in planned_renames:
+        del working[old]
+        working[label["name"]] = label
+
+    actions = []
+    for name, label in yaml_labels.items():
+        if name in renamed_new:
+            continue  # already handled by the rename step
+        if name not in working:
+            actions.append(("create", None, label))
+        else:
+            ex = working[name]
+            if ex["color"] != label["color"] or ex.get("description", "") != label.get("description", ""):
+                actions.append(("update", name, label))
+            else:
+                actions.append(("skip", name, label))
+
+    print(f"Plan for merge on {owner}/{repo}:")
+    for old, label in planned_renames:
+        print(f"  rename  '{old}' -> '{label['name']}'")
+    for action, old_name, label in actions:
+        if action == "create":
+            print(f"  create  '{label['name']}'")
+        elif action == "update":
+            print(f"  update  '{label['name']}'")
+        else:
+            print(f"  skip    '{label['name']}'")
+
+    if not dry_run:
+        for old, label in planned_renames:
+            update_label(owner, repo, old, label, token)
+
+        for action, old_name, label in actions:
+            if action == "create":
+                create_label(owner, repo, label, token)
+            elif action == "update":
+                update_label(owner, repo, old_name, label, token)
+
+        n_rename = len(planned_renames)
+        n_create = sum(1 for a, _, _ in actions if a == "create")
+        n_update = sum(1 for a, _, _ in actions if a == "update")
+        n_skip = sum(1 for a, _, _ in actions if a == "skip")
+        print(f"\nDone: renamed {n_rename}, created {n_create}, updated {n_update}, skipped {n_skip}.")
+    else:
+        n_rename = len(planned_renames)
+        n_create = sum(1 for a, _, _ in actions if a == "create")
+        n_update = sum(1 for a, _, _ in actions if a == "update")
+        n_skip = sum(1 for a, _, _ in actions if a == "skip")
+        print(f"\nDry run complete: would rename {n_rename}, create {n_create}, update {n_update}, skip {n_skip}.")
+
+
+# --- entry point ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="labels",
+        description="Manage GitHub issue labels via a labels.yaml file.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    seed_p = sub.add_parser("seed", help="Seed labels.yaml from a repo's current labels")
+    seed_p.add_argument("repo", metavar="owner/repo")
+
+    apply_p = sub.add_parser("apply", help="Apply labels.yaml to a repo")
+    apply_p.add_argument("repo", metavar="owner/repo")
+    apply_p.add_argument(
+        "--mode",
+        choices=["replace", "merge"],
+        required=True,
+        help="replace: delete all existing labels then recreate; merge: add/update, never delete",
+    )
+    apply_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would happen without making any changes",
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "seed":
+        cmd_seed(args)
+    elif args.command == "apply":
+        cmd_apply(args)
+
+
+if __name__ == "__main__":
+    main()
