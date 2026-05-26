@@ -62,6 +62,15 @@ labels apply DC23/some-repo --mode merge
 labels apply DC23/some-repo --mode merge --dry-run
 ```
 
+### Apply — sync mode
+
+Bring the repo into exact alignment with `labels.yaml`: rename, update, create, and delete as needed. Labels not in the YAML are deleted. This is the recommended mode for keeping repos consistent.
+
+```sh
+labels apply DC23/some-repo --mode sync
+labels apply DC23/some-repo --mode sync --dry-run
+```
+
 ### Apply — replace mode
 
 Delete all existing labels on the repo, then recreate them from `labels.yaml`. You will be prompted to confirm before any changes are made.

@@ -133,8 +133,10 @@ def cmd_apply(args):
 
     if args.mode == "replace":
         _apply_replace(owner, repo, token, yaml_labels, renames, existing, dry_run)
-    else:
+    elif args.mode == "merge":
         _apply_merge(owner, repo, token, yaml_labels, renames, existing, dry_run)
+    else:
+        _apply_sync(owner, repo, token, yaml_labels, renames, existing, dry_run)
 
 
 def _plan_renames(renames, yaml_labels, existing):
@@ -252,6 +254,73 @@ def _apply_merge(owner, repo, token, yaml_labels, renames, existing, dry_run):
         print(f"\nDry run complete: would rename {n_rename}, create {n_create}, update {n_update}, skip {n_skip}.")
 
 
+def _apply_sync(owner, repo, token, yaml_labels, renames, existing, dry_run):
+    planned_renames = _plan_renames(renames, yaml_labels, existing)
+    renamed_old = {old for old, _ in planned_renames}
+    renamed_new = {label["name"] for _, label in planned_renames}
+
+    # Apply renames to our local view of existing labels
+    working = dict(existing)
+    for old, label in planned_renames:
+        del working[old]
+        working[label["name"]] = label
+
+    actions = []
+    for name, label in yaml_labels.items():
+        if name in renamed_new:
+            continue  # already handled by the rename step
+        if name not in working:
+            actions.append(("create", None, label))
+        else:
+            ex = working[name]
+            if ex["color"] != label["color"] or ex.get("description", "") != label.get("description", ""):
+                actions.append(("update", name, label))
+            else:
+                actions.append(("skip", name, label))
+
+    # Delete anything not in the YAML and not a rename source
+    yaml_names = set(yaml_labels.keys()) | renamed_new
+    to_delete = [name for name in working if name not in yaml_names]
+
+    print(f"Plan for sync on {owner}/{repo}:")
+    for old, label in planned_renames:
+        print(f"  rename  '{old}' -> '{label['name']}'")
+    for action, old_name, label in actions:
+        if action == "create":
+            print(f"  create  '{label['name']}'")
+        elif action == "update":
+            print(f"  update  '{label['name']}'")
+        else:
+            print(f"  skip    '{label['name']}'")
+    for name in to_delete:
+        print(f"  delete  '{name}'")
+
+    if not dry_run:
+        for old, label in planned_renames:
+            update_label(owner, repo, old, label, token)
+
+        for action, old_name, label in actions:
+            if action == "create":
+                create_label(owner, repo, label, token)
+            elif action == "update":
+                update_label(owner, repo, old_name, label, token)
+
+        for name in to_delete:
+            delete_label(owner, repo, name, token)
+
+        n_rename = len(planned_renames)
+        n_create = sum(1 for a, _, _ in actions if a == "create")
+        n_update = sum(1 for a, _, _ in actions if a == "update")
+        n_skip = sum(1 for a, _, _ in actions if a == "skip")
+        print(f"\nDone: renamed {n_rename}, created {n_create}, updated {n_update}, skipped {n_skip}, deleted {len(to_delete)}.")
+    else:
+        n_rename = len(planned_renames)
+        n_create = sum(1 for a, _, _ in actions if a == "create")
+        n_update = sum(1 for a, _, _ in actions if a == "update")
+        n_skip = sum(1 for a, _, _ in actions if a == "skip")
+        print(f"\nDry run complete: would rename {n_rename}, create {n_create}, update {n_update}, skip {n_skip}, delete {len(to_delete)}.")
+
+
 # --- entry point ---
 
 def main():
@@ -268,9 +337,9 @@ def main():
     apply_p.add_argument("repo", metavar="owner/repo")
     apply_p.add_argument(
         "--mode",
-        choices=["replace", "merge"],
+        choices=["replace", "merge", "sync"],
         required=True,
-        help="replace: delete all existing labels then recreate; merge: add/update, never delete",
+        help="replace: delete all then recreate; merge: add/update, never delete; sync: rename/update/create/delete to match YAML exactly",
     )
     apply_p.add_argument(
         "--dry-run",
