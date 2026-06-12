@@ -45,3 +45,6 @@ labels:
   - name: blocked
     color: e8a0a0
     description: Progress is blocked by an external dependency
+  - name: epic
+    color: 8B5CF6
+    description: A large body of work that can be broken down into smaller sub-issues
